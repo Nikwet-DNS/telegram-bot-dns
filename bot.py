@@ -23,13 +23,11 @@ from telegram.ext import (
     ConversationHandler
 )
 import dateparser
-import nest_asyncio
 
 # Добавляем импорт конфигурации
 from config import TOKEN, ADMIN_IDS
 
 # Применяем nest_asyncio для Jupyter Notebook и подобных сред
-nest_asyncio.apply()
 
 DATA_FILE = "data.json"
 CHAT_IDS_FILE = "chat_ids.json"
