@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: telegram-bot-dns
+    env: python
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    region: frankfurt
+    plan: free
+    branch: main
+    autoDeploy: true
+    pythonVersion: 3.10.13
