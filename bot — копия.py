@@ -3,7 +3,6 @@ import os
 import json
 import asyncio
 import pytz
-import random
 from pytz import timezone
 from datetime import datetime, time
 from telegram import (
@@ -173,7 +172,7 @@ def build_menu(buttons, n_cols, header_buttons=None, footer_buttons=None):
 promotions, chat_ids = load_initial_data()
 
 # Состояния для ConversationHandler
-SHOP_SELECTION, PROMO_NAME, PROMO_DATES, PROMO_PHOTO, PROMO_LINK, PROMO_SHOPS = range(6)
+SHOP_SELECTION, PROMO_NAME, PROMO_DATES, PROMO_DESC, PROMO_PHOTO, PROMO_LINK, PROMO_SHOPS = range(7)
 EDIT_PROMO_SELECTION, EDIT_SHOP_SELECTION = range(2)
 SELECT_PROMO_FOR_SENDING, SELECT_SHOPS_FOR_SENDING = range(10, 12)
 
@@ -249,6 +248,7 @@ async def handle_promotion_selection(update: Update, context: ContextTypes.DEFAU
     message = f"""
 <b>Акция:</b> {promotion['name']}
 <b>Даты проведения:</b> {promotion['start_date']} — {promotion['end_date']}
+<b>Описание:</b> {promotion['description']}
 <b>Ссылка:</b> {promotion['link']}
 """.strip()
     
@@ -297,55 +297,36 @@ async def handle_add_promotion_name(update: Update, context: ContextTypes.DEFAUL
 
 async def handle_add_promotion_dates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка дат акции"""
-    import re
-
     try:
         dates_text = update.message.text.strip()
+        parts = [p.strip() for p in dates_text.split("-")]
+        if len(parts) != 2:
+            raise ValueError("Неверный формат даты. Используйте формат: '03.06.2025 - 31.07.2025'")
+        
+        start_date = dateparser.parse(parts[0])
+        end_date = dateparser.parse(parts[1])
 
-        # Пример: "с 4 по 28 июля 2025 года"
-        pattern = r"с\s+(\d{1,2})\s+по\s+(\d{1,2})\s+([а-яА-Я]+)\s+(\d{4})"
-        match = re.search(pattern, dates_text, re.IGNORECASE)
+        if not start_date or not end_date:
+            raise ValueError("Не удалось распознать даты.")
 
-        if not match:
-            raise ValueError("Формат должен быть: с 4 по 28 июля 2025 года")
+        context.user_data["add_promotion"]["start_date"] = start_date.date().isoformat()
+        context.user_data["add_promotion"]["end_date"] = end_date.date().isoformat()
 
-        day_start = int(match.group(1))
-        day_end = int(match.group(2))
-        month = match.group(3).lower()
-        year = int(match.group(4))
-
-        # Словарь месяцев
-        month_map = {
-            "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
-            "мая": 5, "июня": 6, "июля": 7, "августа": 8,
-            "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12
-        }
-
-        if month not in month_map:
-            raise ValueError("Неизвестный месяц")
-
-        month_num = month_map[month]
-
-        from datetime import date
-        start_date = date(year, month_num, day_start)
-        end_date = date(year, month_num, day_end)
-
-        if start_date > end_date:
-            raise ValueError("Дата начала позже даты окончания.")
-
-        context.user_data["add_promotion"]["start_date"] = start_date.isoformat()
-        context.user_data["add_promotion"]["end_date"] = end_date.isoformat()
-
-        await update.message.reply_text("Отправьте изображение акции:")
-        return PROMO_PHOTO
+        await update.message.reply_text("Введите описание акции:")
+        return PROMO_DESC
 
     except Exception as e:
         logger.error(f"Ошибка при обработке дат: {e}")
         await update.message.reply_text(
-            "Пожалуйста, введите даты в формате:\n<b>с 4 по 28 июля 2025 года</b>",
-            parse_mode="HTML"
+            "Формат даты неверен. Введите даты в формате: '03.06.2025 - 31.07.2025'"
         )
         return PROMO_DATES
+
+async def handle_add_promotion_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка описания акции"""
+    context.user_data["add_promotion"]["description"] = update.message.text
+    await update.message.reply_text("Отправьте изображение акции:")
+    return PROMO_PHOTO
 
 async def handle_add_promotion_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка фото акции"""
@@ -367,23 +348,18 @@ async def handle_add_promotion_link(update: Update, context: ContextTypes.DEFAUL
     if not link.startswith(('http://', 'https://')):
         await update.message.reply_text("Ссылка должна начинаться с http:// или https://")
         return PROMO_LINK
-
+    
     context.user_data["add_promotion"]["link"] = link
-    context.user_data["add_promotion"]["selected_shops"] = set()
 
-    # Кнопки магазинов + отправить во все
+    # Выбор магазинов
     buttons = []
     for cid, name in chat_ids.items():
-        buttons.append([InlineKeyboardButton(name, callback_data=f"shop_{cid}")])
-    buttons.append([
-        InlineKeyboardButton("📢 Отправить во все", callback_data="shop_all"),
-        InlineKeyboardButton("✅ Готово", callback_data="shops_done")
-    ])
+        buttons.append([InlineKeyboardButton(name, callback_data=f"sendshop_{cid}")])
 
-    await update.message.reply_text(
-        "Выберите магазины, куда добавить акцию. Нажмите ✅ когда закончите:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    buttons.append([
+        InlineKeyboardButton("📢 Отправить во все", callback_data="sendshops_all"),
+        InlineKeyboardButton("✅ Готово", callback_data="sendshops_done")
+    ])
     return PROMO_SHOPS
 
 async def handle_shop_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -391,52 +367,43 @@ async def handle_shop_selection(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     data = query.data
-
-    selected_shops = context.user_data["add_promotion"]["selected_shops"]
-
+    
     if data == "shops_done":
-        if not selected_shops:
+        selected = context.user_data["add_promotion"]["selected_shops"]
+        if not selected:
             await query.message.edit_text("Вы не выбрали ни одного магазина.")
             return PROMO_SHOPS
-
+        
         # Завершаем добавление
         promo_id = str(len(promotions) + 1)
         promo = context.user_data["add_promotion"]
-        promo["shops"] = list(selected_shops)
+        promo["shops"] = list(selected)
         promotions[promo_id] = promo
         save_data(promotions)
-
         await query.message.edit_text("✅ Акция успешно добавлена!")
         await notify_about_new_promotion(context, promo)
         return ConversationHandler.END
-
-    # 📢 Обработка "отправить во все"
-    if data == "shop_all":
-        selected_shops.update(chat_ids.keys())
-
-    # Добавление/удаление конкретного магазина
-    elif data.startswith("shop_"):
-        shop_id = data.split("_")[1]
-        if shop_id in selected_shops:
-            selected_shops.remove(shop_id)
-        else:
-            selected_shops.add(shop_id)
-
+    
+    # Добавление/удаление магазина
+    shop_id = data.split("_")[1]
+    selected_shops = context.user_data["add_promotion"]["selected_shops"]
+    
+    if shop_id in selected_shops:
+        selected_shops.remove(shop_id)
+    else:
+        selected_shops.add(shop_id)
+    
     # Обновляем интерфейс
     buttons = []
     for cid, name in chat_ids.items():
         mark = "✅ " if cid in selected_shops else ""
         buttons.append([InlineKeyboardButton(f"{mark}{name}", callback_data=f"shop_{cid}")])
-    buttons.append([
-        InlineKeyboardButton("📢 Отправить во все", callback_data="shop_all"),
-        InlineKeyboardButton("✅ Готово", callback_data="shops_done")
-    ])
-
+    buttons.append([InlineKeyboardButton("✅ Готово", callback_data="shops_done")])
+    
     try:
         await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         logger.warning(f"Ошибка при обновлении клавиатуры: {e}")
-
     return PROMO_SHOPS
 
 async def cancel_add_promotion(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -754,59 +721,39 @@ async def notify_about_new_promotion(context: ContextTypes.DEFAULT_TYPE, promoti
         except Exception as e:
             logger.warning(f"Ошибка отправки в чат {chat_id}: {e}")
 
-import random  # Убедись, что этот импорт есть вверху файла
-
-import random
-
 async def notify_about_active_promotions(context: ContextTypes.DEFAULT_TYPE):
+    # Логируем текущее время в московском часовом поясе
     moscow_tz = pytz.timezone("Europe/Moscow")
     now = datetime.now(moscow_tz)
-    logger.info(f"Запуск пятничной рассылки акций в {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Запуск рассылки актуальных акций в {now.strftime('%Y-%m-%d %H:%M:%S')} по московскому времени.")
 
+    # Остальной код функции остаётся без изменений
     active_promotions = {pid: p for pid, p in promotions.items() if is_promotion_active(p)}
     logger.info(f"Найдено активных акций: {len(active_promotions)}")
 
-    # Собираем доступные акции по магазинам
-    shop_to_promos = {}
-    for pid, promo in active_promotions.items():
-        for shop_id in promo.get("shops", []):
-            shop_to_promos.setdefault(shop_id, []).append((pid, promo))
+    for promo_id, promo in active_promotions.items():
+        logger.info(f"Обработка акции '{promo['name']}' (ID: {promo_id})")
+        shops = promo.get("shops", [])
+        logger.info(f"Акция связана с магазинами: {shops}")
 
-    used_promos = set()  # ID акций, уже отправленных в других чаты
-
-    for chat_id, promo_list in shop_to_promos.items():
-        available = [p for p in promo_list if p[0] not in used_promos]
-
-        # Если есть хотя бы 3 уникальные — берем из них
-        if len(available) >= 3:
-            selected = random.sample(available, 3)
-        else:
-            # если уникальных не хватает — добираем из всех
-            selected = available.copy()
-            remaining_needed = 3 - len(selected)
-            others = [p for p in promo_list if p not in selected]
-            if others:
-                selected += random.sample(others, min(remaining_needed, len(others)))
-
-        # Отправляем акции
-        for pid, promo in selected:
+        for chat_id in shops:
             try:
+                logger.info(f"Отправка акции в чат {chat_id}...")
                 with open(promo["photo"], "rb") as photo:
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=photo,
-                        caption=(
-                            f"📣 Акция: {promo['name']}\n"
+                        caption = (
+                            f"⏰ Напоминаем об акции: {promo['name']}\n"
                             f"📅 Даты проведения: {promo['start_date']} — {promo['end_date']}"
                         ),
-                        parse_mode="HTML"
+                        parse_mode="HTML",
                     )
-                logger.info(f"Акция '{promo['name']}' отправлена в чат {chat_id}")
-                used_promos.add(pid)
+                logger.info(f"Акция успешно отправлена в чат {chat_id}")
             except Exception as e:
-                logger.error(f"Ошибка отправки акции в чат {chat_id}: {e}")
-
-    logger.info("Пятничная рассылка акций завершена.")
+                logger.error(f"Ошибка отправки в чат {chat_id}: {e}")
+    
+    logger.info("Завершение рассылки актуальных акций.")
 
 async def notify_about_expiring_promotions(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Проверка акций на завершение через 3 дня...")
@@ -842,56 +789,34 @@ async def notify_about_expiring_promotions(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка при проверке акции {promo_id}: {e}")
 
+async def notify_admin_about_expired_promotions(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Проверка завершившихся акций...")
+    
+    # Получаем текущую дату
+    today = datetime.now().date()
+    
+    for promo_id, promo in promotions.copy().items():
+        try:
+            end_date = datetime.fromisoformat(promo["end_date"]).date()
+            
+            # Если акция завершилась сегодня
+            if end_date == today:
+                logger.info(f"Акция '{promo['name']}' завершилась сегодня.")
+                
+                # Отправляем уведомление администратору
+                message = (
+                    f"❌ Акция '{promo['name']}' завершилась.\n"
+                    f"📅 Дата окончания: {promo['end_date']}"
+                )
+                await context.bot.send_message(chat_id=ADMIN_IDS, text=message)
+                logger.info(f"Уведомление об окончании акции отправлено администратору.")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке акции {promo_id}: {e}")
+
 # Обработчик ошибок
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
     logger.error("Exception while handling an update:", exc_info=context.error)
-
-async def auto_delete_expired_promotions(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Автоудаление завершившихся акций...")
-
-    today = datetime.now().date()
-    expired_ids = []
-    expired_names = {}
-
-    for promo_id, promo in promotions.copy().items():
-        try:
-            end_date = datetime.fromisoformat(promo["end_date"]).date()
-            if end_date == today:
-                expired_ids.append(promo_id)
-                expired_names[promo_id] = promo["name"]
-
-                # Удалим фото
-                photo_path = promo.get("photo")
-                if photo_path and os.path.exists(photo_path):
-                    try:
-                        os.remove(photo_path)
-                        logger.info(f"Удалено фото для акции {promo['name']}")
-                    except Exception as e:
-                        logger.warning(f"Ошибка при удалении фото: {e}")
-        except Exception as e:
-            logger.warning(f"Ошибка обработки даты окончания у акции {promo_id}: {e}")
-
-    for promo_id in expired_ids:
-        try:
-            del promotions[promo_id]
-            logger.info(f"Удалена акция: {expired_names[promo_id]}")
-        except Exception as e:
-            logger.error(f"Ошибка при удалении акции {promo_id}: {e}")
-
-    if expired_ids:
-        save_data(promotions)
-        logger.info(f"Сохранены изменения. Удалено акций: {len(expired_ids)}")
-
-        # Уведомление всем администраторам
-        for admin_id in ADMIN_IDS:
-            for pid, name in expired_names.items():
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"❌ Акция '{name}' была автоматически удалена после завершения."
-                )
-    else:
-        logger.info("Нет акций для удаления.")
 
 async def main():
     # Добавляем проверку существования токена
@@ -957,6 +882,7 @@ async def main():
             PROMO_DATES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_promotion_dates)],
             PROMO_PHOTO: [MessageHandler(filters.PHOTO, handle_add_promotion_photo)],
             PROMO_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_promotion_link)],
+            PROMO_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_promotion_description)],
             PROMO_SHOPS: [CallbackQueryHandler(handle_shop_selection, pattern=r"^(shop_|shops_done)")]
         },
         fallbacks=[CommandHandler("cancel", cancel_add_promotion)]
@@ -989,22 +915,21 @@ async def main():
 
     # Устанавливаем время для рассылки в московском часовом поясе
     moscow_tz = pytz.timezone("Europe/Moscow")
-    scheduled_time = time(hour=20, minute=39, tzinfo=moscow_tz)
+    scheduled_time = time(hour=10, minute=0, tzinfo=moscow_tz)
     # Добавляем задачу в планировщик
     job_queue.run_daily(
         notify_about_active_promotions,
         time=scheduled_time,
         days=(0, 1, 2, 3, 4, 5, 6)  # Каждый день
     )
- 
-    # Автоудаление акций в 23:59
+
+    # Уведомление администратора о завершении акций
     job_queue.run_daily(
-        auto_delete_expired_promotions,
-        time=time(hour=23, minute=59, tzinfo=timezone("Europe/Moscow")),
+        notify_admin_about_expired_promotions,
+        time=time(hour=0, minute=0, tzinfo=timezone("Europe/Moscow")),
         days=(0, 1, 2, 3, 4, 5, 6)
     )
-
-    logger.info("Планировщик уведомлений настроен.")
+    logger.info("Планировщик уведомлений настроен на 10:00 по московскому времени.")
 
     # Запуск бота
     await application.run_polling()
