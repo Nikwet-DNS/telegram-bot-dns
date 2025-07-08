@@ -9,4 +9,3 @@ services:
     plan: free
     branch: main
     autoDeploy: true
-    pythonVersion: 3.10.13
